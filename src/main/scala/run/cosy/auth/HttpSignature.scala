@@ -6,7 +6,7 @@ import java.security.{NoSuchAlgorithmException, PrivateKey, PublicKey, Signature
 import java.util.Base64
 
 import akka.http.scaladsl.model.headers._
-import akka.http.scaladsl.model.{HttpRequest, Uri}
+import akka.http.scaladsl.model.{HttpHeader, HttpRequest, Uri}
 
 import scala.util.{Failure, Success, Try}
 
@@ -33,9 +33,6 @@ case class SignatureVerificationException(msg: String, sigInfo: SignedInfo) exte
 
 
 object HttpSignature {
-  val base64encoder = Base64.getEncoder
-  val base64decoder = Base64.getDecoder
-
 
   /**
     * This function is used to build the `signature string` from the request.
@@ -56,7 +53,7 @@ object HttpSignature {
           req.uri.rawQueryString.map("?" + _).getOrElse("")
       case ct@"content-type" => ct + ":" + req.entity.contentType.toString
       case name =>
-        val values = req.headers.filter(_.is(name))
+        val values = req.headers.collect{ case HttpHeader(`name`,value) => value}
         if (values.isEmpty)
           throw SignatureRequestException(s"found no header for $name in request")
         else name + ": " + values.mkString(",")
@@ -104,7 +101,7 @@ object HttpSignature {
         }
         signature <- params.get("signature")
           .fold[Try[Array[Byte]]](SigFail("no signature was sent!")) { sig =>
-          Try(base64decoder.decode(sig)).recoverWith {
+          Try(Base64.getDecoder.decode(sig)).recoverWith {
             case e: IllegalArgumentException => SigFail("signature is not a base64 encoding")
           }
         }
@@ -123,13 +120,13 @@ object HttpSignature {
       * todo: the realm is not used.
       * find the list of headers recommended by the server to build up the signature text
       *
-      * @param wwwAuthHeader
+      * @param wwwAuthHeader the parsed WWW-Authenticate header
       * @return the list of headers recommended by the server
       */
-    def signatureHeaders(wwwAuthHeader: `WWW-Authenticate`): Option[Array[String]] =
+    def signatureHeaders(wwwAuthHeader: `WWW-Authenticate`): Option[List[String]] =
       wwwAuthHeader.challenges.collectFirst {
         case HttpChallenge("Signature", realm, params) =>
-          params.get("headers").map(_.split("""\s+""")).getOrElse(Array("date"))
+          params.get("headers").map(_.split("""\s+""")).getOrElse(Array("date")).toList
       }
   }
 
@@ -174,14 +171,13 @@ class SignedInfo(
   private val signature: Array[Byte]
 ) {
   import HttpSignature.Server.SigVFail
-  import HttpSignature.base64decoder
 
   def verify(pubKey: PublicKey): Try[Uri] = {
     try {
       val sig = Signature.getInstance(sigInfo.algorithm)
       sig.initVerify(pubKey)
       sig.update(sigInfo.sigText.getBytes("US-ASCII")) //should be ascii only
-      if (sig.verify(base64decoder.decode(signature))) Success(sigInfo.keyId)
+      if (sig.verify(Base64.getDecoder.decode(signature))) Success(sigInfo.keyId)
       else SigVFail("could not cryptographically verify signature", this)
     } catch {
       case nsa: NoSuchAlgorithmException => SigVFail("could not find implementation for " +
@@ -191,7 +187,7 @@ class SignedInfo(
     }
   }
 
-  lazy val encodedSig = HttpSignature.base64encoder.encodeToString(signature)
+  lazy val encodedSig: String = Base64.getEncoder.encodeToString(signature)
 
   def makeAuthorization: Authorization = {
     val atvals: Seq[(String,String)] = Seq("keyId" -> sigInfo.keyId.toString, "algorithm" -> sigInfo.algorithm,
