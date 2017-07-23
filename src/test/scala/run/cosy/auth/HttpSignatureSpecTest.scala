@@ -1,5 +1,6 @@
 package run.cosy.auth
 
+import run.cosy.auth.HttpSignature.{Client, Server}
 
 import akka.http.scaladsl.model.HttpEntity.Strict
 import akka.http.scaladsl.model.MediaTypes._
@@ -8,7 +9,6 @@ import akka.http.scaladsl.model.headers.{Date, _}
 import akka.util.ByteString
 import org.scalatest._
 import org.scalatest.Matchers._
-
 
 import scala.collection.immutable
 
@@ -35,10 +35,10 @@ class HttpSignatureSpecTest  extends FreeSpec {
       ),
       entity = Strict(ContentType(`application/json`),ByteString("""{"hello": "world"}"""))
     )
+  
+    //https://w3c-dvcg.github.io/http-signatures/#auth-isa
+    "Initiating Signature Authorization" - {
 
-    "Initiating Signature Authorization" in {
-
-      //https://w3c-dvcg.github.io/http-signatures/#auth-isa
       // header is captured by code below, but it's not easy to build request from a string
 //      """
 //        |HTTP/1.1 401 Unauthorized
@@ -55,19 +55,46 @@ class HttpSignatureSpecTest  extends FreeSpec {
         `WWW-Authenticate`(HttpChallenge("Signature","Example",Map("headers"->"(request-target) date")))
       ))
 
-      val headersForSig = HttpSignature.Client.signatureHeaders(serverResponse.header[`WWW-Authenticate`].get)
+      val serverRequiredHeaders = List("(request-target)", "date")
+      
+      "should extract the list of headers to be signed as requested by the server" in {
+        val headersForSig = Client.signatureHeaders(serverResponse.header[`WWW-Authenticate`].get).get
+        serverRequiredHeaders should be(headersForSig)
+      }
 
-      List("(request-target)", "date") should be (headersForSig.get)
-
-      val toSignText = HttpSignature.buildSignatureText(request,headersForSig.get)
-
-      val expectedResponse =  """
-                   |(request-target): post /foo
-                   |date: Sat, 07 Jun 2014 20:51:35 GMT
-                   """.stripMargin.trim
-
-      expectedResponse should be (toSignText.get)
-
+      val expectedToBeSignedTxt = """
+           |(request-target): post /foo
+           |date: Sat, 07 Jun 2014 20:51:35 GMT
+           """.stripMargin.trim
+  
+      "for the given request and needed headers the signature text should be" in {
+        val toSignText = HttpSignature.buildSignatureText(request,serverRequiredHeaders)
+        expectedToBeSignedTxt should be(toSignText.get)
+      }
+      
+      val moreHeaders = serverRequiredHeaders:::List("content-type")
+      val expctToBeSignedTxt2 = """
+          |(request-target): post /foo
+          |date: Sat, 07 Jun 2014 20:51:35 GMT
+          |content-type: application/json""".stripMargin.trim
+      
+      "for the extra headers content-type header the signature text should be" in {
+        val toSignText = HttpSignature.buildSignatureText(request,moreHeaders)
+        expctToBeSignedTxt2 should be(toSignText.get)
+      }
+  
+      val evenMoreHeaders = moreHeaders:::List("content-length")
+      val expctToBeSignedTxt3 = """
+          |(request-target): post /foo
+          |date: Sat, 07 Jun 2014 20:51:35 GMT
+          |content-type: application/json
+          |content-length: 18""".stripMargin.trim
+  
+      "for the extra content-length header the signature text should be" in {
+        val toSignText = HttpSignature.buildSignatureText(request,evenMoreHeaders)
+        expctToBeSignedTxt3 should be(toSignText.get)
+      }
+  
     }
 
 

@@ -51,7 +51,10 @@ object HttpSignature {
       case rt@"(request-target)" =>
         rt + ": " + req.method.value.toLowerCase + " " + req.uri.path +
           req.uri.rawQueryString.map("?" + _).getOrElse("")
-      case ct@"content-type" => ct + ":" + req.entity.contentType.toString
+      case ct@"content-type" => ct + ": " + req.entity.contentType.toString
+      case cl@"content-length" => cl + ": " + req.entity.contentLengthOption.getOrElse {
+         throw SignatureRequestException("no content-length for this header")
+      }
       case name =>
         val values = req.headers.collect{ case HttpHeader(`name`,value) => value}
         if (values.isEmpty)
