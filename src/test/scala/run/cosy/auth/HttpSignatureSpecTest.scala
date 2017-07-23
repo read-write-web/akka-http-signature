@@ -1,7 +1,8 @@
 package run.cosy.auth
 
 import java.io.StringReader
-import java.security.KeyFactory
+import java.math.BigInteger
+import java.security.{KeyFactory, PrivateKey, PublicKey, Signature}
 import java.security.interfaces.RSAPublicKey
 import java.security.spec.{RSAPrivateKeySpec, RSAPublicKeySpec}
 import java.util.Base64
@@ -12,6 +13,7 @@ import akka.http.scaladsl.model._
 import akka.http.scaladsl.model.headers.{Date, _}
 import akka.util.ByteString
 import org.bouncycastle.asn1.{ASN1InputStream, pkcs}
+import org.bouncycastle.util.BigIntegers
 import org.bouncycastle.util.io.pem.PemReader
 import org.scalatest.Matchers._
 import org.scalatest._
@@ -20,14 +22,17 @@ import scala.collection.immutable
 
 class HttpSignatureSpecTest  extends FreeSpec {
   
-  val rsaKeyFactory = KeyFactory.getInstance("RSA")
+  val rsaKeyFactory: KeyFactory = KeyFactory.getInstance("RSA")
   
   //these two keys are taken from the spec
   val rsaPublicKeyMime = """
+      |-----BEGIN PUBLIC KEY-----
       |MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDCFENGw33yGihy92pDjZQhl0C3
       |6rPJj+CvfSC8+q28hxA161QFNUd13wuCTUcq0Qd2qsBe/2hFyc2DCJJg0h1L78+6
       |Z4UMR7EOcpfdUE9Hf3m/hs+FUR45uBJeDK1HSFHD8bHKD6kv8FPGfJTotc+2xjJw
-      |oYi+1hqp1fIekaxsyQIDAQAB""".stripMargin.trim.lines.mkString("\r\n")
+      |oYi+1hqp1fIekaxsyQIDAQAB
+      |-----END PUBLIC KEY-----
+      """.stripMargin.trim.lines.mkString("\r\n")
   
   val rsaPrivateKeyMime = """
       |MIICXgIBAAKBgQDCFENGw33yGihy92pDjZQhl0C36rPJj+CvfSC8+q28hxA161QF
@@ -44,19 +49,35 @@ class HttpSignatureSpecTest  extends FreeSpec {
       |G6aFKaqQfOXKCyWoUiVknQJAXrlgySFci/2ueKlIE1QqIiLSZ8V8OlpFLRnb1pzI
       |7U1yQXnTAEFYM560yJlzUpOb1V4cScGd365tiSMvxLOvTA==""".stripMargin.trim.lines.mkString("\r\n")
   
-  val rsaPubKey = {
-    //cannot do this without bouncy castle
+  import org.bouncycastle.jce.provider.BouncyCastleProvider
+  import java.security.Security
+  
+  Security.addProvider(new BouncyCastleProvider)
+  
+  val rsaPubKey: PublicKey = {
+    //trying to do this with bouncy castle 1
     //https://stackoverflow.com/questions/4032985/how-do-we-convert-a-string-from-pem-to-der-format
-    val pemReader = new PemReader(new StringReader(rsaPublicKeyMime))
-    pemReader.readPemObject().asInstanceOf[RSAPublicKey]
-// this should work too:
+//    val pemReader = new PemReader(new StringReader(rsaPublicKeyMime))
+//    val pk = pemReader.readPemObject().asInstanceOf[pkcs.RSAPublicKey]
+//    val spec = new RSAPublicKeySpec(pk.getModulus,pk.getPublicExponent)//    rsaKeyFactory.generatePublic(spec)
+// this does not quite work, though it is very similar to private key code which does:
 //    val keyBytes = Base64.getMimeDecoder.decode(rsaPublicKeyMime)
 //    val pStruct = pkcs.RSAPublicKey.getInstance(new ASN1InputStream(keyBytes).readObject)
-//    val spec = new RSAPublicKeySpec(pStruct.getModulus, pStruct.getPublicExponent)
-//    rsaKeyFactory.generatePublic(spec)
+    
+    //using this service I was able to convert the public key in xmldsig format
+    // https://www.w3.org/TR/xmldsig-core/
+    // https://superdry.apphb.com/tools/online-rsa-key-converter
+    
+    val decode = (str: String) => BigIntegers.fromUnsignedByteArray(Base64.getDecoder.decode(str))
+    val modulus = decode("whRDRsN98hoocvdqQ42UIZdAt+qzyY/gr30gvPqtvIcQNetUBTVHdd8Lgk1HKtEHdqrAX" +
+     "v9oRcnNgwiSYNIdS+/PumeFDEexDnKX3VBPR395v4bPhVEeObgSXgytR0hRw/Gxyg+pL/BTxnyU6LXPtsYycKGIvtYaqdXyHpGsbMk=")
+    val exponent = decode("AQAB")
+    val spec = new RSAPublicKeySpec(modulus,exponent)
+    rsaKeyFactory.generatePublic(spec)
+    
   }
   
-  val rsaPrivateKey = {
+  val rsaPrivateKey: PrivateKey = {
     val keyBytes = Base64.getMimeDecoder.decode(rsaPrivateKeyMime)
     val pStruct = pkcs.RSAPrivateKey.getInstance(new ASN1InputStream(keyBytes).readObject)
     val spec = new RSAPrivateKeySpec(pStruct.getModulus, pStruct.getPrivateExponent)
@@ -149,24 +170,68 @@ class HttpSignatureSpecTest  extends FreeSpec {
   
     "signature tests" - {
       
+      "verify public key" - {
+        val text = "A dog went for a walk"
+        
+         "we can sign our text and then verify it" in {
+           val sig = Signature.getInstance(HttpSignature.`rsa-sha256`.javaName)
+           
+           sig.initSign(rsaPrivateKey)
+           sig.update(text.getBytes("US-ASCII"))
+           val signature = sig.sign()
+           
+           val sig2 = Signature.getInstance(HttpSignature.`rsa-sha256`.javaName)
+           sig2.initVerify(rsaPubKey)
+           sig2.update(text.getBytes("US-ASCII")) //should be ascii only
+           assert(sig2.verify(signature))
+         }
+      }
+      
       val signer = HttpSignature.Client(Uri("Test"),rsaPrivateKey)
       
-      "default test https://w3c-dvcg.github.io/http-signatures/#rfc.section.C.1" in {
-        val defaultReq = HttpRequest(uri=Uri("/foo"),
-          headers=immutable.Seq(
-            Date(DateTime(2014,1,5,21,31,40)),
-          )
-        )
-        val resultSig = """
+      """C.1 default test.
+         see: https://w3c-dvcg.github.io/http-signatures/#rfc.section.C.1)""" - {
+        
+        val expectedSig = """
             |ATp0r26dbMIxOopqw0OfABDT7CKMIoENumuruOtarj8n/97Q3htH
             |FYpH8yOSQk3Z5zh8UxUym6FYTb5+A0Nz3NRsXJibnYi7brE/4tx5But9kkFGzG+
-            |xpUmimN4c3TMN7OFH//+r8hBf7BT9/GmHDUVZT2JzWGLZES2xDOUuMtA=""".trim.stripMargin
-        val authTry = signer.authorize(defaultReq)
-        authTry.isSuccess should be(true)
+            |xpUmimN4c3TMN7OFH//+r8hBf7BT9/GmHDUVZT2JzWGLZES2xDOUuMtA=""".trim.stripMargin.mkString("")
+  
+        "fictional date for 5 Jan 2014, but one in the spec" in {
+          //this is the one in the current spec
+          val fictionalDateStr = "date: Thu, 05 Jan 2014 21:31:40 GMT"
+          val fsi = new SigInfo(List("date"), HttpSignature.`rsa-sha256`, "Test", fictionalDateStr)
+  
+          val calculatedSignature = fsi.sign(rsaPrivateKey).get.encodedSig
+          calculatedSignature should be(expectedSig)
+        }
+  
+        "actual date for 5 jan 2014, but not in spec" in {
+          val actualDateStr = "date: Sun, 05 Jan 2014 21:31:40 GMT"
+          val asi = new SigInfo(List("date"), HttpSignature.`rsa-sha256`, "Test", actualDateStr)
+          val calculatedSignature = asi.sign(rsaPrivateKey).get.encodedSig
+          println(">@>" + calculatedSignature)
+          //        calculatedSignature should be(expectedSig)
+  
+          val defaultReq = HttpRequest(uri=Uri("/foo"),
+            headers=immutable.Seq(
+              Date(DateTime(2014,1,5,21,31,40)),
+            )
+          )
+          val authTry = signer.authorize(defaultReq)
+          authTry.isSuccess should be(true)
+
+          val signedInfo = HttpSignature.Server.parseSignatureInfo(authTry.get,defaultReq)
+          println("signedInfo="+signedInfo.get.encodedSig)
+          signedInfo.get.sigInfo.sigText should be(actualDateStr)
+          signedInfo.get.sigInfo.headers should be(List("date"))
+          signedInfo.get.verify(rsaPubKey).get should be(Uri("Test"))
+        }
+  
         
-        println(defaultReq)
-        println(resultSig)
-        println(authTry)
+//        println(defaultReq)
+//        println(expectedSig)
+//        println(authTry.get)
       }
       
     }

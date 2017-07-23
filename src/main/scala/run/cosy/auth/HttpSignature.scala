@@ -38,13 +38,13 @@ case class SignatureVerificationException(msg: String, sigInfo: SignedInfo) exte
 object HttpSignature {
    
    case class Algorithm(specName: String, javaName: String) {
-      def signature = Signature.getInstance(javaName)
+      def signature: Signature = Signature.getInstance(javaName)
    }
    
    object `rsa-sha256` extends Algorithm("rsa-sha256","SHA256withRSA")
    
    object Algorithm {
-      val algorithMap = Seq[Algorithm](`rsa-sha256`).map(a=>(a.specName,a)).toMap
+      val algorithMap: Map[String, Algorithm] = Seq[Algorithm](`rsa-sha256`).map(a=>(a.specName,a)).toMap
       
       def apply(specname: String): Try[Algorithm] = algorithMap.get(specname)
        .fold[Try[Algorithm]](SigFail(s"algorithm '$specname' not known"))(Success(_))
@@ -149,7 +149,11 @@ object HttpSignature {
    
       //todo: how much of this info is collectable from the the WWW-Authentictate, ie, just passed on from the server?
       //   for each one see, as that may determine how strongly the arguments should be typed
-      def authorize(req: HttpRequest, signatureHeaders: List[String]=List(), algorithm: Algorithm=`rsa-sha256`): Try[Authorization] = {
+      def authorize(
+       req: HttpRequest,
+       signatureHeaders: List[String]=List("date"),
+       algorithm: Algorithm=`rsa-sha256`
+      ): Try[Authorization] = {
          HttpSignature.buildSignatureText(req, signatureHeaders).flatMap { sigtxt =>
             val si = new SigInfo(signatureHeaders, algorithm = algorithm , keyId, sigtxt)
             si.sign(privKey).map(_.makeAuthorization)
@@ -189,17 +193,17 @@ object HttpSignature {
 
 
 class SignedInfo(
-  sigInfo: SigInfo,
+  val sigInfo: SigInfo,
   private val signature: Array[Byte]
 ) {
   import HttpSignature.Server.SigVFail
 
   def verify(pubKey: PublicKey): Try[Uri] = {
     try {
-      val sig = Signature.getInstance(sigInfo.algorithm.javaName)
+      val sig = sigInfo.algorithm.signature
       sig.initVerify(pubKey)
       sig.update(sigInfo.sigText.getBytes("US-ASCII")) //should be ascii only
-      if (sig.verify(Base64.getDecoder.decode(signature))) Success(sigInfo.keyId)
+      if (sig.verify(signature)) Success(sigInfo.keyId)
       else SigVFail("could not cryptographically verify signature", this)
     } catch {
       case nsa: NoSuchAlgorithmException => SigVFail("could not find implementation for " +
