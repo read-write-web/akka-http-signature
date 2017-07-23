@@ -7,7 +7,10 @@ import java.util.Base64
 
 import akka.http.scaladsl.model.headers._
 import akka.http.scaladsl.model.{HttpHeader, HttpRequest, Uri}
+import run.cosy.auth.HttpSignature.Algorithm
+import run.cosy.auth.HttpSignature.Server.SigFail
 
+import scala.collection.immutable.HashMap
 import scala.util.{Failure, Success, Try}
 
 
@@ -33,6 +36,19 @@ case class SignatureVerificationException(msg: String, sigInfo: SignedInfo) exte
 
 
 object HttpSignature {
+   
+   case class Algorithm(specName: String, javaName: String) {
+      def signature = Signature.getInstance(javaName)
+   }
+   
+   object `rsa-sha256` extends Algorithm("rsa-sha256","SHA256withRSA")
+   
+   object Algorithm {
+      val algorithMap = Seq[Algorithm](`rsa-sha256`).map(a=>(a.specName,a)).toMap
+      
+      def apply(specname: String): Try[Algorithm] = algorithMap.get(specname)
+       .fold[Try[Algorithm]](SigFail(s"algorithm '$specname' not known"))(Success(_))
+   }
 
   /**
     * This function is used to build the `signature string` from the request.
@@ -46,7 +62,7 @@ object HttpSignature {
     * @param headers the lowercase list of headers that need to be used to build the signature
     * @return a Try of the string to be signed
     */
-  def buildSignatureText(req: HttpRequest, headers: List[String]): Try[String] = try {
+  def buildSignatureText(req: HttpRequest, headers: List[String]=List()): Try[String] = try {
     Success(headers.map {
       case rt@"(request-target)" =>
         rt + ": " + req.method.value.toLowerCase + " " + req.uri.path +
@@ -94,13 +110,8 @@ object HttpSignature {
             case e: MalformedURLException => SigFail("could not transform keyId to URL")
           }
         }
-        algo <- params.get("algorithm")
-          .fold[Try[String]](SigFail("algorithm was not specified")) {
-          //java standard names http://docs.oracle
-          // .com/javase/8/docs/technotes/guides/security/StandardNames.html
-          case "rsa-sha256" => Success("SHA256withRSA") //sadly java does not provide a typed
-          // non mutable Signature object
-          case algo => SigFail(s"algorithm '$algo' not known")
+        algo <- params.get("algorithm").fold[Try[Algorithm]](SigFail("algorithm used in signature must be specified")){
+           Algorithm(_)
         }
         signature <- params.get("signature")
           .fold[Try[Array[Byte]]](SigFail("no signature was sent!")) { sig =>
@@ -119,34 +130,42 @@ object HttpSignature {
   }
 
   object Client {
-    /**
-      * todo: the realm is not used.
-      * find the list of headers recommended by the server to build up the signature text
-      *
-      * @param wwwAuthHeader the parsed WWW-Authenticate header
-      * @return the list of headers recommended by the server
-      */
-    def signatureHeaders(wwwAuthHeader: `WWW-Authenticate`): Option[List[String]] =
-      wwwAuthHeader.challenges.collectFirst {
-        case HttpChallenge("Signature", realm, params) =>
-          params.get("headers").map(_.split("""\s+""")).getOrElse(Array("date")).toList
-      }
+     /**
+       * todo: the realm is not used.
+       * find the list of headers recommended by the server to build up the signature text
+       *
+       * @param wwwAuthHeader the parsed WWW-Authenticate header
+       * @return the list of headers recommended by the server
+       */
+     def signatureHeaders(wwwAuthHeader: `WWW-Authenticate`): Option[List[String]] =
+        wwwAuthHeader.challenges.collectFirst {
+           case HttpChallenge("Signature", realm, params) =>
+              params.get("headers").map(_.split("""\s+""")).getOrElse(Array("date")).toList
+        }
+     
   }
-
+   
+   case class Client(keyId: Uri, privKey: PrivateKey) {
+   
+      //todo: how much of this info is collectable from the the WWW-Authentictate, ie, just passed on from the server?
+      //   for each one see, as that may determine how strongly the arguments should be typed
+      def authorize(req: HttpRequest, signatureHeaders: List[String]=List(), algorithm: Algorithm=`rsa-sha256`): Try[Authorization] = {
+         HttpSignature.buildSignatureText(req, signatureHeaders).flatMap { sigtxt =>
+            val si = new SigInfo(signatureHeaders, algorithm = algorithm , keyId, sigtxt)
+            si.sign(privKey).map(_.makeAuthorization)
+         }
+      }
+   }
+   
 }
 
  class SigInfo(
   val headers: List[String],  //the headers used to make the signature text
-  val algorithm: String,  //the algorithm to be used in the signature, and verification
+  val algorithm: Algorithm,  //the algorithm to be used in the signature, and verification
   val keyId: Uri, //the id of the key that will sign
   val sigText: String,  //the text to be signed
 ) {
-
-  //
-  def algorithmStr: String = algorithm match {
-    case "SHA256withRSA" => "rsa-sha256"
-  }
-
+    
   def sign(privKey: PrivateKey): Try[SignedInfo]  =
     signBytes(privKey).map(new SignedInfo(this,_))
 
@@ -160,7 +179,7 @@ object HttpSignature {
     *         - java.security.SignatureException
     */
   private def signBytes(privkey: PrivateKey): Try[Array[Byte]] = Try {
-    val sig = Signature.getInstance(algorithm)
+    val sig = algorithm.signature
     sig.initSign(privkey)
     sig.update(sigText.getBytes("US-ASCII"))
     sig.sign()
@@ -177,7 +196,7 @@ class SignedInfo(
 
   def verify(pubKey: PublicKey): Try[Uri] = {
     try {
-      val sig = Signature.getInstance(sigInfo.algorithm)
+      val sig = Signature.getInstance(sigInfo.algorithm.javaName)
       sig.initVerify(pubKey)
       sig.update(sigInfo.sigText.getBytes("US-ASCII")) //should be ascii only
       if (sig.verify(Base64.getDecoder.decode(signature))) Success(sigInfo.keyId)
@@ -193,7 +212,7 @@ class SignedInfo(
   lazy val encodedSig: String = Base64.getEncoder.encodeToString(signature)
 
   def makeAuthorization: Authorization = {
-    val atvals: Seq[(String,String)] = Seq("keyId" -> sigInfo.keyId.toString, "algorithm" -> sigInfo.algorithm,
+    val atvals: Seq[(String,String)] = Seq("keyId" -> sigInfo.keyId.toString, "algorithm" -> sigInfo.algorithm.specName,
       "headers" -> sigInfo.headers.mkString(" "),
       "signature" -> encodedSig )
     Authorization(GenericHttpCredentials("Signature", Map(atvals:_*)))

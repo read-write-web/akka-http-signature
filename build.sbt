@@ -12,5 +12,7 @@ libraryDependencies ++= Seq(
 
 // http://www.scalatest.org/install
 libraryDependencies += "org.scalactic" %% "scalactic" % "3.0.1"
-libraryDependencies += "org.scalatest" %% "scalatest" % "3.0.1" % "test"
+libraryDependencies += "org.scalatest" %% "scalatest" % "3.0.1" % Test
 
+//http://repo2.maven.org/maven2/org/bouncycastle/bcprov-jdk15on/
+libraryDependencies += "org.bouncycastle" % "bcprov-jdk15on" % "1.57" % Test
