@@ -10,7 +10,6 @@ import akka.http.scaladsl.model.{HttpHeader, HttpRequest, Uri}
 import run.cosy.auth.HttpSignature.Algorithm
 import run.cosy.auth.HttpSignature.Server.SigFail
 
-import scala.collection.immutable.HashMap
 import scala.util.{Failure, Success, Try}
 
 
