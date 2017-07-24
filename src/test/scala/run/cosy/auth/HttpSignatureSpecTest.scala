@@ -1,10 +1,7 @@
 package run.cosy.auth
 
-import java.io.StringReader
-import java.math.BigInteger
-import java.security.{KeyFactory, PrivateKey, PublicKey, Signature}
-import java.security.interfaces.RSAPublicKey
 import java.security.spec.{RSAPrivateKeySpec, RSAPublicKeySpec}
+import java.security.{KeyFactory, PrivateKey, PublicKey, Signature}
 import java.util.Base64
 
 import akka.http.scaladsl.model.HttpEntity.Strict
@@ -14,7 +11,6 @@ import akka.http.scaladsl.model.headers.{Date, _}
 import akka.util.ByteString
 import org.bouncycastle.asn1.{ASN1InputStream, pkcs}
 import org.bouncycastle.util.BigIntegers
-import org.bouncycastle.util.io.pem.PemReader
 import org.scalatest.Matchers._
 import org.scalatest._
 
@@ -49,8 +45,9 @@ class HttpSignatureSpecTest  extends FreeSpec {
       |G6aFKaqQfOXKCyWoUiVknQJAXrlgySFci/2ueKlIE1QqIiLSZ8V8OlpFLRnb1pzI
       |7U1yQXnTAEFYM560yJlzUpOb1V4cScGd365tiSMvxLOvTA==""".stripMargin.trim.lines.mkString("\r\n")
   
-  import org.bouncycastle.jce.provider.BouncyCastleProvider
   import java.security.Security
+
+  import org.bouncycastle.jce.provider.BouncyCastleProvider
   
   Security.addProvider(new BouncyCastleProvider)
   
@@ -238,7 +235,6 @@ class HttpSignatureSpecTest  extends FreeSpec {
           authTry.get.credentials.params("signature") should be(signatureNotInSpecButExpected)
 
           val signedInfo = HttpSignature.Server.parseSignatureInfo(authTry.get,defaultReq)
-          println("signedInfo="+signedInfo.get.encodedSig)
           signedInfo.get.sigInfo.sigText should be(tobesigned)
           signedInfo.get.encodedSig should be(signatureNotInSpecButExpected)
           signedInfo.get.sigInfo.headers should be(List("date"))
